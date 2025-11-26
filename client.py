@@ -22,7 +22,7 @@ def upload():
         "replication_factor": rep_factor
     }
 
-    resp = requests.post(MASTER_URL + "/upload", json=payload)
+    resp = requests.post(MASTER + "/upload", json=payload)
     if resp.status_code != 200:
         print("Upload failed:", resp.text)
         return
