@@ -32,6 +32,33 @@ def status():
         report = {p: ("UP" if info["alive"] else "DOWN") for p, info in nodes.items()}
     return jsonify(report)
 
+@app.route("/delete", methods=["POST"])
+def delete_file():
+    data = request.get_json(force=True)
+    filename = data.get("filename")
+
+    if not filename:
+        return "Filename required", 400
+
+    with lock:
+        if filename not in file_index:
+            return "File not found", 404
+
+        nodes_to_delete = file_index[filename].copy()
+
+    # Ask all nodes to delete the file
+    for p in nodes_to_delete:
+        try:
+            url = f"http://127.0.0.1:{p}/delete"
+            requests.post(url, json={"filename": filename}, timeout=5)
+        except:
+            pass
+
+    with lock:
+        del file_index[filename]
+
+    print(f"[MASTER] Deleted file {filename} from system.")
+    return jsonify({"deleted_from": nodes_to_delete})
 
 @app.route("/heartbeat", methods=["POST"])
 def heartbeat():

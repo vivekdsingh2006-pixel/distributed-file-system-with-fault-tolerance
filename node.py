@@ -31,6 +31,19 @@ def store():
     print(f"[NODE {PORT}] Stored {filename}")
     return "OK", 200
 
+@app.route("/delete", methods=["POST"])
+def delete():
+    data = request.get_json(force=True)
+    filename = data["filename"]
+    path = f"{STORAGE_PATH}/{filename}"
+
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[NODE {PORT}] Deleted {filename}")
+        return "OK", 200
+    else:
+        return "File not found", 404
+
 
 @app.route("/download", methods=["POST"])
 def download():

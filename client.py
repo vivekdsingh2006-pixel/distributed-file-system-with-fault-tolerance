@@ -2,6 +2,17 @@ import requests
 
 MASTER = "http://127.0.0.1:4000"
 
+def delete_file():
+    name = input("Enter filename to delete: ")
+
+    resp = requests.post(MASTER + "/delete", json={"filename": name})
+    
+    if resp.status_code != 200:
+        print("Delete failed:", resp.text)
+        return
+    
+    deleted = resp.json().get("deleted_from", [])
+    print("Deleted from nodes:", deleted)
 
 def upload():
     filename = input("Enter file name to upload (e.g. notes.txt): ").strip()
@@ -78,7 +89,7 @@ def status():
 
 if __name__ == "__main__":
     while True:
-        print("\n1 Upload\n2 Download\n3 List\n4 Status\n5 Exit")
+        print("\n1 Upload\n2 Download\n3 List\n4 Status\n5 Delete\n6 Exit")
         ch = input("Choice: ")
         if ch == "1":
             upload()
@@ -88,5 +99,7 @@ if __name__ == "__main__":
             list_files()
         elif ch == "4":
             status()
+        elif ch == "5":
+            delete_file()
         else:
             break
