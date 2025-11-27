@@ -1,105 +1,86 @@
 import requests
+import os
 
 MASTER = "http://127.0.0.1:4000"
 
-def delete_file():
-    name = input("Enter filename to delete: ")
+# ---------------- UPLOAD ----------------
+def upload_file(filepath):
+    filename = os.path.basename(filepath)
 
-    resp = requests.post(MASTER + "/delete", json={"filename": name})
-    
-    if resp.status_code != 200:
-        print("Delete failed:", resp.text)
-        return
-    
-    deleted = resp.json().get("deleted_from", [])
-    print("Deleted from nodes:", deleted)
+    # Read file content
+    with open(filepath, "r") as f:
+        content = f.read()
 
-def upload():
-    filename = input("Enter file name to upload (e.g. notes.txt): ").strip()
-    if not filename:
-        print("Filename required")
-        return
-
-    content = input("Enter file content: ")
-
-    try:
-        rep_factor = int(input("Enter replication factor (1 to 5): ").strip())
-    except:
-        print("Invalid number")
-        return
+    # Ask user for replication factor (optional)
+    rep_factor = 2  # default
 
     payload = {
         "filename": filename,
         "replication_factor": rep_factor
     }
 
+    # Send upload request to master
     resp = requests.post(MASTER + "/upload", json=payload)
     if resp.status_code != 200:
-        print("Upload failed:", resp.text)
-        return
+        return "Upload failed: " + resp.text
 
     nodes = resp.json().get("store_in", [])
-    print("Master -> store in nodes:", nodes)
 
+    # Store file on each node
     for p in nodes:
-        node_url = f"http://127.0.0.1:{p}/store"
-        try:
-            r = requests.post(node_url, json={"filename": filename, "data": content}, timeout=5)
-            if r.status_code == 200:
-                print(f"Stored on node {p}")
-            else:
-                print(f"Node {p} store failed: {r.status_code} {r.text}")
-        except Exception as e:
-            print(f"Error contacting node {p}: {e}")
+        url = f"http://127.0.0.1:{p}/store"
+        requests.post(url, json={"filename": filename, "data": content})
 
-def download():
-    name = input("Filename: ")
+    return f"Stored on nodes: {nodes}"
 
-    r = requests.post(MASTER + "/locate", json={"filename": name})
+
+# ---------------- DOWNLOAD ----------------
+def download_file(filename):
+    # Ask master where file is
+    r = requests.post(MASTER + "/locate", json={"filename": filename})
     if r.status_code != 200:
-        print("Not found")
-        return
+        return "File not found"
 
     nodes = r.json()["nodes"]
 
+    # Try each node until one responds
     for p in nodes:
         try:
             r = requests.post(f"http://127.0.0.1:{p}/download",
-                              json={"filename": name}, timeout=5)
+                              json={"filename": filename}, timeout=5)
+
             if r.status_code == 200:
-                print("Content:\n", r.json()["data"])
-                return
+                content = r.json()["data"]
+
+                os.makedirs("downloads", exist_ok=True)
+                path = f"downloads/{filename}"
+
+                with open(path, "w") as f:
+                    f.write(content)
+
+                return path
         except:
             pass
 
-    print("Could not download")
+    return "Download failed"
 
 
+# ---------------- LIST FILES ----------------
 def list_files():
     d = requests.get(MASTER + "/list").json()
-    for f, lst in d.items():
-        print(f"{f} -> {lst}")
+    return [f"{f}  -> {lst}" for f, lst in d.items()]
 
 
-def status():
+# ---------------- DELETE ----------------
+def delete_file(filename):
+    resp = requests.post(MASTER + "/delete", json={"filename": filename})
+    if resp.status_code != 200:
+        return "Delete failed: " + resp.text
+
+    return resp.json()
+
+
+# ---------------- NODE STATUS ----------------
+def get_node_status():
     d = requests.get(MASTER + "/status").json()
-    for p, s in d.items():
-        print(p, s)
-
-
-if __name__ == "__main__":
-    while True:
-        print("\n1 Upload\n2 Download\n3 List\n4 Status\n5 Delete\n6 Exit")
-        ch = input("Choice: ")
-        if ch == "1":
-            upload()
-        elif ch == "2":
-            download()
-        elif ch == "3":
-            list_files()
-        elif ch == "4":
-            status()
-        elif ch == "5":
-            delete_file()
-        else:
-            break
+    return [{"id": p, "status": s} for p, s in d.items()]
