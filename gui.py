@@ -1,144 +1,682 @@
+"""
+NeoFS Glassmorphic GUI with Light/Dark Theme + Block-based DFS
+
+Palette (light):
+ - BG: #EFECE3 (light cream)
+ - CARD: #8FABD4 (light blue)
+ - ACCENT: #4A70A9 (mid blue)
+ - TEXT: #000000 (black)
+Modal style: centered, rounded, white glow border
+Active Clients replaces Replicas
+"""
+
 import tkinter as tk
-from tkinter import filedialog, simpledialog
-import threading
-import client
+from tkinter import ttk, filedialog, simpledialog
+import threading, requests, subprocess, time, os, uuid, atexit
+
+MASTER_URL = "http://127.0.0.1:4000"
+NODE_PORTS = ["5001", "5002", "5003", "5004", "5005"]
+POLL_INTERVAL = 1.0
+
+# Must match master/client
+BLOCK_SIZE = 64 * 1024
+
+# ----- THEMES -----
+THEMES = {
+    "light": {
+        "BG": "#EFECE3",
+        "CARD": "#8FABD4",
+        "ACCENT": "#4A70A9",
+        "TEXT": "#000000",
+        "MODAL_BG": "#FFFFFF",
+        "MODAL_FG": "#000000",
+        "TEXTBOX_BG": "#fbfbfe",
+    },
+    "dark": {
+        "BG": "#0F172A",        # dark navy
+        "CARD": "#1E293B",      # card blue-gray
+        "ACCENT": "#334155",    # accent
+        "TEXT": "#E5E7EB",      # light text
+        "MODAL_BG": "#111827",
+        "MODAL_FG": "#E5E7EB",
+        "TEXTBOX_BG": "#020617",
+    },
+}
+
+# These will be set by NeoFS_GUI._apply_theme()
+BG = "#EFECE3"
+CARD = "#8FABD4"
+ACCENT = "#4A70A9"
+TEXT = "#000000"
+MODAL_BG = "#FFFFFF"
+MODAL_FG = "#000000"
+TEXTBOX_BG = "#fbfbfe"
 
 
-# ---------- Helper Thread ----------
-def run_in_thread(func, *args):
-    threading.Thread(target=func, args=args).start()
+class GlassModal(tk.Toplevel):
+    def __init__(self, parent, title, message, confirm_text="OK", cancel_text=None, on_confirm=None):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title(title)
+        self.configure(bg=MODAL_BG)
+        self.resizable(False, False)
+
+        w, h = 440, 180
+        self.geometry(f"{w}x{h}")
+
+        parent.update_idletasks()
+        px = parent.winfo_rootx()
+        py = parent.winfo_rooty()
+        pw = parent.winfo_width()
+        ph = parent.winfo_height()
+        x = px + (pw - w) // 2
+        y = py + (ph - h) // 2
+        self.geometry(f"+{max(20, x)}+{max(20, y)}")
+
+        outer = tk.Frame(self, bg=ACCENT, bd=0)
+        outer.place(x=6, y=6, relwidth=1, relheight=1)
+        inner = tk.Frame(outer, bg=MODAL_BG, bd=0)
+        inner.pack(expand=True, fill="both", padx=6, pady=6)
+
+        tk.Label(inner, text=title, font=("Segoe UI", 12, "bold"), bg=MODAL_BG, fg=MODAL_FG).pack(
+            anchor="w", padx=12, pady=(8, 2)
+        )
+        tk.Label(
+            inner,
+            text=message,
+            font=("Segoe UI", 10),
+            bg=MODAL_BG,
+            fg=MODAL_FG,
+            wraplength=400,
+            justify="left",
+        ).pack(padx=12, pady=(0, 12))
+
+        btnf = tk.Frame(inner, bg=MODAL_BG)
+        btnf.pack(side="bottom", anchor="e", padx=12, pady=8)
+
+        if cancel_text:
+            tk.Button(btnf, text=cancel_text, command=self._cancel, bg=ACCENT, fg="white", bd=0).pack(
+                side="right", padx=6
+            )
+
+        tk.Button(btnf, text=confirm_text, command=self._confirm, bg=ACCENT, fg="white", bd=0).pack(
+            side="right", padx=6
+        )
+        self.on_confirm = on_confirm
+
+    def _confirm(self):
+        if self.on_confirm:
+            try:
+                self.on_confirm()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _cancel(self):
+        self.destroy()
 
 
-# ---------- GUI Application ----------
-class DFS_GUI:
+class NeoFS_GUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Distributed File System - GUI (Dark Mode)")
-        self.root.geometry("650x550")
+        root.title("NeoFS - Distributed File System")
+        root.geometry("1120x760")
+        root.minsize(980, 640)
 
-        # DARK THEME COLORS
-        self.bg = "#1b1b1b"        # background
-        self.fg = "#ffffff"        # text
-        self.btn_bg = "#2e2e2e"    # button background
-        self.btn_fg = "#00aaff"    # blue text
-        self.log_bg = "#0f0f0f"    # log background
+        self.theme = "light"
+        self._apply_theme()
+        root.configure(bg=BG)
 
-        self.root.configure(bg=self.bg)
+        self.client_id = str(uuid.uuid4())
+        self.master_process = None
+        self.node_processes = {}
+        self.stat_vars = {
+            "total": tk.StringVar(value=str(len(NODE_PORTS))),
+            "active_clients": tk.StringVar(value="1"),
+            "failed": tk.StringVar(value="0"),
+        }
+        self.node_widgets = {}
 
-        # Title
-        tk.Label(
-            root,
-            text="Distributed File System",
-            font=("Arial", 22, "bold"),
-            fg=self.btn_fg,
-            bg=self.bg
-        ).pack(pady=15)
+        self._build_ui()
+        self.start_master_if_needed()
 
-        # Buttons Frame
-        frame = tk.Frame(root, bg=self.bg)
-        frame.pack(pady=5)
+        self.polling = True
+        threading.Thread(target=self._poll_loop, daemon=True).start()
+        threading.Thread(target=self._client_heartbeat_loop, daemon=True).start()
 
-        self.make_btn(frame, "Upload File", self.upload_file, 0, 0)
-        self.make_btn(frame, "Download File", self.download_file, 0, 1)
-        self.make_btn(frame, "List Files", self.list_files, 1, 0)
-        self.make_btn(frame, "Delete File", self.delete_file, 1, 1)
-        self.make_btn(frame, "Node Status", self.node_status, 2, 0, 2)
+        atexit.register(self.cleanup)
 
-        # Output Log
-        self.output = tk.Text(
-            root,
-            height=14,
-            width=70,
-            bg=self.log_bg,
-            fg=self.fg,
-            insertbackground=self.fg,
-            bd=2,
-            relief="ridge"
+    # ================= THEME ====================
+
+    def _apply_theme(self):
+        global BG, CARD, ACCENT, TEXT, MODAL_BG, MODAL_FG, TEXTBOX_BG
+        th = THEMES.get(self.theme, THEMES["light"])
+        BG = th["BG"]
+        CARD = th["CARD"]
+        ACCENT = th["ACCENT"]
+        TEXT = th["TEXT"]
+        MODAL_BG = th["MODAL_BG"]
+        MODAL_FG = th["MODAL_FG"]
+        TEXTBOX_BG = th["TEXTBOX_BG"]
+
+    def toggle_theme(self):
+        self.theme = "dark" if self.theme == "light" else "light"
+        self._apply_theme()
+        # Rebuild UI with new colors
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.node_widgets = {}
+        self._build_ui()
+        self.log(f"Switched to {self.theme.capitalize()} theme")
+
+    # ================= UI ====================
+
+    def _build_ui(self):
+
+        sidebar = tk.Frame(self.root, bg=ACCENT, width=260)
+        sidebar.pack(side="left", fill="y")
+        tk.Label(sidebar, text="NeoFS", font=("Segoe UI", 20, "bold"), fg="white", bg=ACCENT).pack(pady=(18, 6))
+        tk.Label(sidebar, text="Distributed File System", fg="white", bg=ACCENT).pack()
+
+        menu = [
+            ("Upload File", self.open_upload_dialog),
+            ("Download File", self.download_dialog),
+            ("List Files", self.list_files),
+            ("Delete File", self.delete_dialog),
+            ("Node Panel", self.node_panel),
+        ]
+
+        for t, c in menu:
+            tk.Button(sidebar, text=t, command=c, bg=CARD, fg=TEXT, bd=0, pady=8).pack(
+                fill="x", padx=12, pady=8
+            )
+
+        tk.Label(sidebar, text="Node Status", fg="white", bg=ACCENT, font=("Segoe UI", 10, "bold")).pack(
+            pady=(12, 4)
         )
-        self.output.pack(pady=20)
 
-    # ---------- Button Creator ----------
-    def make_btn(self, frame, text, command, row, col, colspan=1):
+        for p in NODE_PORTS:
+            row = tk.Frame(sidebar, bg=ACCENT)
+            row.pack(fill="x", padx=8, pady=4)
+            c = tk.Canvas(row, width=14, height=14, bg=ACCENT, highlightthickness=0)
+            oid = c.create_oval(2, 2, 12, 12, fill="#ff6b6b")
+            c.pack(side="left", padx=(4, 8))
+            lbl = tk.Label(row, text=f"Node {p}", bg=ACCENT, fg="white")
+            lbl.pack(side="left")
+            ts = tk.Label(row, text="—", bg=ACCENT, fg="white")
+            ts.pack(side="right")
+            self.node_widgets[p] = {"canvas": c, "oval": oid, "ts": ts}
+
+        tk.Button(sidebar, text="Start Master", command=self.start_master, bg="#163b52", fg="white", bd=0).pack(
+            fill="x", padx=12, pady=(18, 4)
+        )
+        tk.Button(sidebar, text="Stop Master", command=self.stop_master, bg="#7a3a3a", fg="white", bd=0).pack(
+            fill="x", padx=12
+        )
+
         tk.Button(
-            frame,
-            text=text,
-            width=20,
-            font=("Arial", 11, "bold"),
-            command=command,
-            bg=self.btn_bg,
-            fg=self.btn_fg,
-            activebackground="#3c3c3c",
-            activeforeground="#00ccff",
-            relief="ridge",
-            bd=2
-        ).grid(row=row, column=col, columnspan=colspan, padx=10, pady=10)
+            sidebar,
+            text="Toggle Theme",
+            command=self.toggle_theme,
+            bg="#111827",
+            fg="white",
+            bd=0,
+            pady=8,
+        ).pack(fill="x", padx=12, pady=(18, 4))
 
-    # ---------- Button Actions ----------
-    def upload_file(self):
-        filepath = filedialog.askopenfilename()
-        if filepath:
-            run_in_thread(self._upload, filepath)
+        main = tk.Frame(self.root, bg=BG)
+        main.pack(side="left", fill="both", expand=True, padx=18, pady=12)
 
-    def _upload(self, filepath):
+        hdr = tk.Frame(main, bg=BG)
+        hdr.pack(fill="x", pady=(6, 14))
+
+        self._stat_card(hdr, "Total Nodes", self.stat_vars["total"]).pack(side="left", padx=8)
+        self._stat_card(hdr, "Active Clients", self.stat_vars["active_clients"]).pack(side="left", padx=8)
+        self._stat_card(hdr, "Failed Nodes", self.stat_vars["failed"]).pack(side="left", padx=8)
+
+        body = tk.Frame(main, bg=BG)
+        body.pack(fill="both", expand=True)
+
+        leftcol = tk.Frame(body, bg=BG)
+        leftcol.pack(side="left", fill="y", padx=(0, 12))
+
+        upcard = tk.Frame(leftcol, bg=CARD, width=420, height=240, bd=0)
+        upcard.pack(pady=6)
+        upcard.pack_propagate(False)
+
+        tk.Label(upcard, text="File Upload", bg=CARD, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(
+            anchor="w", padx=12, pady=(8, 0)
+        )
+
+        self.drop = tk.Frame(upcard, bg="#ffffff", width=380, height=130)
+        self.drop.pack(padx=12, pady=8)
+        self.drop.pack_propagate(False)
+
+        tk.Label(self.drop, text="Click to select file or drag here", bg="#ffffff", fg=TEXT).pack(expand=True)
+
+        # CLICKABLE DROP ZONE
+        self.drop.bind("<Button-1>", lambda e: self.open_upload_dialog())
+
+        self.chosen_label = tk.Label(upcard, text="", bg=CARD, fg=TEXT)
+        self.chosen_label.pack()
+
+        self.progress = ttk.Progressbar(upcard, orient="horizontal", length=360, mode="determinate")
+        self.progress.pack(pady=8)
+
+        rightcol = tk.Frame(body, bg=BG)
+        rightcol.pack(side="left", fill="both", expand=True)
+
+        tk.Label(rightcol, text="System Details", bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.details = tk.Text(rightcol, height=14, bg=TEXTBOX_BG, fg=TEXT)
+        self.details.pack(fill="both", expand=True, pady=8)
+
+        tk.Label(rightcol, text="Activity Log", bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        self.logbox = tk.Text(rightcol, height=6, bg=TEXTBOX_BG, fg=TEXT)
+        self.logbox.pack(fill="x")
+
+    # ================= COMMON HELPERS ====================
+
+    def _stat_card(self, parent, title, var):
+        f = tk.Frame(parent, bg=ACCENT, width=180, height=72)
+        f.pack_propagate(False)
+        tk.Label(f, text=title, bg=ACCENT, fg="white").pack(anchor="w", padx=10, pady=(6, 0))
+        tk.Label(f, textvariable=var, bg=ACCENT, fg="white", font=("Segoe UI", 18, "bold")).pack(
+            anchor="w", padx=10
+        )
+        return f
+
+    def log(self, msg):
+        ts = time.strftime("%H:%M:%S")
         try:
-            resp = client.upload_file(filepath)
-            self.log(f"[UPLOAD]\n{filepath}\n{resp}")
-        except Exception as e:
-            self.log(f"[ERROR] Upload failed: {e}")
-
-    def download_file(self):
-        filename = simpledialog.askstring("Download", "Enter filename:")
-        if filename:
-            run_in_thread(self._download, filename)
-
-    def _download(self, filename):
+            self.logbox.insert(tk.END, f"[{ts}] {msg}\n")
+            self.logbox.see(tk.END)
+        except Exception:
+            pass
         try:
-            resp = client.download_file(filename)
-            self.log(f"[DOWNLOAD]\n{filename}\nSaved at: {resp}")
+            self.details.insert(tk.END, f"[{ts}] {msg}\n")
+            self.details.see(tk.END)
+        except Exception:
+            pass
+
+    # ================= MASTER/CLIENT ====================
+
+    def start_master_if_needed(self):
+        try:
+            requests.get(MASTER_URL + "/status", timeout=1)
+            self.log("Master already running.")
+        except Exception:
+            self.start_master()
+
+    def start_master(self):
+        try:
+            self.master_process = subprocess.Popen(["python", "master.py"])
+            self.log("Master started by GUI.")
         except Exception as e:
-            self.log(f"[ERROR] Download failed: {e}")
+            self.log(f"Failed to start master: {e}")
+
+    def stop_master(self):
+        if self.master_process:
+            try:
+                self.master_process.terminate()
+                self.log("Master terminated (GUI requested).")
+            except Exception as e:
+                self.log(f"Error stopping master: {e}")
+            self.master_process = None
+        else:
+            self.log("Master not started by GUI.")
+
+    # ================= NODES ====================
+
+    def node_panel(self):
+        GlassModal(self.root, "Node Panel", "Start or stop nodes from this panel", confirm_text="Close")
+        w = tk.Toplevel(self.root)
+        w.title("Node Panel")
+        w.geometry("420x360")
+        w.configure(bg=BG)
+        tk.Label(w, text="Start / Stop Nodes", bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(pady=10)
+
+        for p in NODE_PORTS:
+            row = tk.Frame(w, bg=BG)
+            row.pack(fill="x", padx=12, pady=6)
+            tk.Label(row, text=f"Node {p}", bg=BG, fg=TEXT, width=12, anchor="w").pack(side="left")
+            tk.Button(row, text="Start", bg=ACCENT, fg="white", command=lambda pp=p: self.start_node(pp)).pack(
+                side="left", padx=6
+            )
+            tk.Button(
+                row, text="Stop", bg="#b44a4a", fg="white", command=lambda pp=p: self.stop_node(pp)
+            ).pack(side="left", padx=6)
+
+    def start_node(self, port):
+        if port in self.node_processes:
+            self.log(f"Node {port} already started.")
+            return
+        try:
+            p = subprocess.Popen(["python", "node.py", port])
+            self.node_processes[port] = p
+            self.log(f"Started node {port}.")
+        except Exception as e:
+            self.log(f"Failed to start node {port}: {e}")
+
+    def stop_node(self, port):
+        try:
+            requests.post(f"http://127.0.0.1:{port}/shutdown", timeout=1)
+        except Exception:
+            pass
+        if port in self.node_processes:
+            try:
+                self.node_processes[port].terminate()
+            except Exception:
+                pass
+            del self.node_processes[port]
+        self.log(f"Stop requested for node {port}.")
+
+    # ================= BACKGROUND LOOPS ====================
+
+    def _poll_loop(self):
+        while True:
+            try:
+                resp = requests.get(MASTER_URL + "/status", timeout=2)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    nodes = data.get("nodes", {})
+                    ac = data.get("active_clients", 0)
+                    self.stat_vars["active_clients"].set(str(ac))
+
+                    for p, w in self.node_widgets.items():
+                        st = nodes.get(p, "DOWN")
+                        color = "#53e89b" if st == "UP" else "#ff7b7b"
+                        try:
+                            w["canvas"].itemconfig(w["oval"], fill=color)
+                            w["ts"].config(text=time.strftime("%H:%M:%S") if st == "UP" else "—")
+                        except Exception:
+                            # might be mid-theme-toggle rebuild
+                            pass
+
+                    failed = len([1 for p in NODE_PORTS if nodes.get(p, "DOWN") != "UP"])
+                    self.stat_vars["failed"].set(str(failed))
+
+                else:
+                    for p, w in self.node_widgets.items():
+                        try:
+                            w["canvas"].itemconfig(w["oval"], fill="#6b6b6b")
+                        except Exception:
+                            pass
+
+                time.sleep(POLL_INTERVAL)
+
+            except Exception:
+                for p, w in self.node_widgets.items():
+                    try:
+                        w["canvas"].itemconfig(w["oval"], fill="#6b6b6b")
+                        w["ts"].config(text="—")
+                    except Exception:
+                        pass
+                time.sleep(POLL_INTERVAL)
+
+    def _client_heartbeat_loop(self):
+        while True:
+            try:
+                requests.post(
+                    MASTER_URL + "/client_heartbeat",
+                    json={"id": self.client_id},
+                    timeout=1,
+                )
+            except Exception:
+                pass
+            time.sleep(3)
+
+    # ================= BLOCK HELPERS ====================
+
+    def _split_file_into_blocks(self, path):
+        with open(path, "rb") as f:
+            data = f.read()
+        size = len(data)
+        blocks = []
+        for i in range(0, size, BLOCK_SIZE):
+            chunk_bytes = data[i : i + BLOCK_SIZE]
+            chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
+            blocks.append(chunk_str)
+        return size, blocks
+
+    # ================= FILE OPS: UPLOAD ====================
+
+    def open_upload_dialog(self):
+        path = filedialog.askopenfilename()
+        if not path:
+            return
+        self.chosen_label.config(text=os.path.basename(path))
+        rep = simpledialog.askinteger(
+            "Replication", f"Enter replication factor (1-{len(NODE_PORTS)}):",
+            minvalue=1, maxvalue=len(NODE_PORTS)
+        )
+        if not rep:
+            rep = 1
+        threading.Thread(target=self._upload_job, args=(path, rep), daemon=True).start()
+
+    def _upload_job(self, path, rep):
+        filename = os.path.basename(path)
+        self.log(f"Preparing {filename} for upload (RF={rep})")
+
+        try:
+            size, blocks = self._split_file_into_blocks(path)
+            num_blocks = len(blocks)
+            self.log(f"{filename}: {num_blocks} blocks, size={size} bytes")
+
+            # Ask Master for block placements
+            self.log(f"Requesting master to store {filename} (RF={rep})")
+            r = requests.post(
+                MASTER_URL + "/upload",
+                json={
+                    "filename": filename,
+                    "replication_factor": rep,
+                    "num_blocks": num_blocks,
+                    "size": size,
+                },
+                timeout=10,
+            )
+            if r.status_code != 200:
+                self.log(f"Master error: {r.text}")
+                GlassModal(self.root, "Upload Failed", f"Master error: {r.text}", confirm_text="OK")
+                return
+
+            meta = r.json()
+            block_metas = meta.get("blocks", [])
+            if len(block_metas) != num_blocks:
+                self.log("Master returned inconsistent block mapping")
+                GlassModal(
+                    self.root,
+                    "Upload Failed",
+                    "Master returned inconsistent block mapping",
+                    confirm_text="OK",
+                )
+                return
+
+            total_steps = len(block_metas) * max(1, rep)
+            self.progress["maximum"] = total_steps
+            self.progress["value"] = 0
+
+            step = 0
+            # Push blocks to nodes
+            for i, (block_data, bmeta) in enumerate(zip(blocks, block_metas)):
+                block_id = bmeta["id"]
+                nodes = bmeta["nodes"]
+                self.log(f"Uploading block {i}/{num_blocks - 1} ({block_id}) -> {nodes}")
+
+                for p in nodes:
+                    try:
+                        rr = requests.post(
+                            f"http://127.0.0.1:{p}/block_store",
+                            json={"block_id": block_id, "data": block_data},
+                            timeout=12,
+                        )
+                        if rr.status_code == 200:
+                            self.log(f"Stored block {block_id} on node {p}")
+                        else:
+                            self.log(f"Node {p} store failed for block {block_id}: {rr.text}")
+                    except Exception as e:
+                        self.log(f"Error pushing block {block_id} to node {p}: {e}")
+
+                    step += 1
+                    self.progress["value"] = step
+                    self.root.update_idletasks()
+
+            self.progress["value"] = 0
+            GlassModal(
+                self.root,
+                "Upload Complete",
+                f"{filename} uploaded as {num_blocks} blocks",
+                confirm_text="OK",
+            )
+
+        except Exception as e:
+            self.log(f"Upload exception: {e}")
+            GlassModal(self.root, "Upload Error", str(e), confirm_text="OK")
+
+    # ================= FILE OPS: DOWNLOAD ====================
+
+    def download_dialog(self):
+        def on_confirm():
+            fname = ent.get().strip()
+            if fname:
+                threading.Thread(target=self._download_job, args=(fname,), daemon=True).start()
+            dlg.destroy()
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Download File")
+        dlg.geometry("420x140")
+        dlg.configure(bg=MODAL_BG)
+        tk.Label(dlg, text="Enter filename to download", bg=MODAL_BG, fg=MODAL_FG).pack(pady=(10, 6))
+        ent = tk.Entry(dlg, width=40)
+        ent.pack(pady=6)
+        tk.Button(dlg, text="Download", command=on_confirm, bg=ACCENT, fg="white").pack(pady=6)
+
+    def _download_job(self, filename):
+        try:
+            r = requests.post(MASTER_URL + "/locate", json={"filename": filename}, timeout=8)
+            if r.status_code != 200:
+                self.log(f"Locate failed: {r.text}")
+                GlassModal(self.root, "Download Failed", f"Locate failed: {r.text}", confirm_text="OK")
+                return
+
+            meta = r.json()
+            blocks = meta.get("blocks", [])
+
+            assembled = []
+            for b in blocks:
+                block_id = b["id"]
+                nodes = b["nodes"]
+                block_data = None
+
+                for p in nodes:
+                    try:
+                        rr = requests.post(
+                            f"http://127.0.0.1:{p}/block_fetch",
+                            json={"block_id": block_id},
+                            timeout=8,
+                        )
+                        if rr.status_code == 200:
+                            block_data = rr.json().get("data", "")
+                            self.log(f"Downloaded block {block_id} from node {p}")
+                            break
+                    except Exception as e:
+                        self.log(f"Node {p} failed for block {block_id}: {e}")
+
+                if block_data is None:
+                    GlassModal(
+                        self.root,
+                        "Download Failed",
+                        f"Failed to download block {block_id} from all replicas.",
+                        confirm_text="OK",
+                    )
+                    return
+
+                assembled.append(block_data)
+
+            os.makedirs("downloads", exist_ok=True)
+            out_path = os.path.join("downloads", filename)
+            with open(out_path, "w", encoding="utf-8", errors="ignore") as f:
+                f.write("".join(assembled))
+
+            self.log(f"Downloaded {filename} to {out_path}")
+            GlassModal(self.root, "Download Complete", f"Saved to {out_path}", confirm_text="OK")
+
+        except Exception as e:
+            self.log(f"Download exception: {e}")
+            GlassModal(self.root, "Download Error", str(e), confirm_text="OK")
+
+    # ================= FILE OPS: LIST/DELETE ====================
 
     def list_files(self):
-        run_in_thread(self._list)
-
-    def _list(self):
         try:
-            data = client.list_files()
-            self.log("📄 Files in DFS:\n" + "\n".join(data))
+            r = requests.get(MASTER_URL + "/list", timeout=6)
+            if r.status_code == 200:
+                d = r.json()
+                lines = []
+                for k, v in d.items():
+                    lines.append(
+                        f"{k} -> blocks={v.get('num_blocks', 0)}, "
+                        f"RF={v.get('replication_factor', 1)}, "
+                        f"size={v.get('size', 0)}"
+                    )
+                GlassModal(
+                    self.root,
+                    "Files in DFS",
+                    "\n".join(lines) or "(no files)",
+                    confirm_text="Close",
+                )
+            else:
+                GlassModal(self.root, "List Failed", r.text, confirm_text="OK")
         except Exception as e:
-            self.log(f"[ERROR] Could not list files: {e}")
+            GlassModal(self.root, "List Error", str(e), confirm_text="OK")
 
-    def delete_file(self):
-        filename = simpledialog.askstring("Delete", "Enter filename:")
-        if filename:
-            run_in_thread(self._delete, filename)
+    def delete_dialog(self):
+        def on_confirm():
+            fname = ent.get().strip()
+            if fname:
+                threading.Thread(target=self._delete_job, args=(fname,), daemon=True).start()
+            dlg.destroy()
 
-    def _delete(self, filename):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Delete File")
+        dlg.geometry("420x140")
+        dlg.configure(bg=MODAL_BG)
+        tk.Label(dlg, text="Enter filename to delete", bg=MODAL_BG, fg=MODAL_FG).pack(pady=(10, 6))
+        ent = tk.Entry(dlg, width=40)
+        ent.pack(pady=6)
+        tk.Button(dlg, text="Delete", command=on_confirm, bg="#b23b3b", fg="white").pack(pady=6)
+
+    def _delete_job(self, filename):
         try:
-            resp = client.delete_file(filename)
-            self.log(f"[DELETE]\n{filename}\n{resp}")
+            r = requests.post(MASTER_URL + "/delete", json={"filename": filename}, timeout=6)
+            if r.status_code == 200:
+                self.log(f"Deleted {filename} -> {r.json()}")
+                GlassModal(self.root, "Delete Success", f"Deleted {filename}", confirm_text="OK")
+            else:
+                self.log(f"Delete failed: {r.text}")
+                GlassModal(self.root, "Delete Failed", r.text, confirm_text="OK")
         except Exception as e:
-            self.log(f"[ERROR] Delete failed: {e}")
+            self.log(f"Delete exception: {e}")
+            GlassModal(self.root, "Delete Error", str(e), confirm_text="OK")
 
-    def node_status(self):
-        run_in_thread(self._status)
+    # ================= CLEANUP ====================
 
-    def _status(self):
-        try:
-            status = client.get_node_status()
-            pretty = "\n".join([f"Node {n['id']} → {n['status']}" for n in status])
-            self.log("🔌 Node Status:\n" + pretty)
-        except Exception as e:
-            self.log(f"[ERROR] Status check failed: {e}")
+    def cleanup(self):
+        self.polling = False
+        if self.master_process:
+            try:
+                self.master_process.terminate()
+            except Exception:
+                pass
 
-    # ---------- Logger ----------
-    def log(self, text):
-        self.output.insert(tk.END, text + "\n\n")
-        self.output.see(tk.END)
+        for p in list(self.node_processes.values()):
+            try:
+                p.terminate()
+            except Exception:
+                pass
 
 
-# ---------- Start GUI ----------
 if __name__ == "__main__":
     root = tk.Tk()
-    app = DFS_GUI(root)
+    app = NeoFS_GUI(root)
     root.mainloop()

@@ -1,97 +1,160 @@
 from flask import Flask, request, jsonify
-import os
-import threading
-import time
-import sys
-import requests
+import os, threading, time, sys, requests
 
 app = Flask(__name__)
 
-if len(sys.argv) != 2:
+if len(sys.argv) < 2:
     print("Usage: python node.py <port>")
     sys.exit(1)
 
 PORT = sys.argv[1]
-NODE_NUM = PORT[-1]
-STORAGE_PATH = f"storage/node{NODE_NUM}"
+NODE_NUM = PORT[-1]  # assumes single digit 1..9
+STORAGE = f"storage/node{NODE_NUM}"
 MASTER = "http://127.0.0.1:4000"
 
-os.makedirs(STORAGE_PATH, exist_ok=True)
+os.makedirs(STORAGE, exist_ok=True)
+running = True
 
 
-@app.route("/store", methods=["POST"])
-def store():
-    d = request.get_json(force=True)
-    filename = d["filename"]
-    data = d.get("data", "")
+# -------- BLOCK-BASED STORAGE --------
 
-    with open(f"{STORAGE_PATH}/{filename}", "w") as f:
-        f.write(data)
+def block_path(block_id: str) -> str:
+    # Simple safe filename derivation
+    safe_id = block_id.replace("/", "_")
+    return os.path.join(STORAGE, f"{safe_id}.blk")
 
-    print(f"[NODE {PORT}] Stored {filename}")
-    return "OK", 200
 
-@app.route("/delete", methods=["POST"])
-def delete():
+@app.route("/block_store", methods=["POST"])
+def block_store():
+    """
+    Store a single block on this node.
+    Request:
+        { "block_id": "file__blk0", "data": "<block-bytes-as-text>" }
+    """
     data = request.get_json(force=True)
-    filename = data["filename"]
-    path = f"{STORAGE_PATH}/{filename}"
+    block_id = data.get("block_id")
+    content = data.get("data", "")
 
-    if os.path.exists(path):
-        os.remove(path)
-        print(f"[NODE {PORT}] Deleted {filename}")
+    if not block_id:
+        return "missing block_id", 400
+
+    try:
+        path = block_path(block_id)
+        with open(path, "w", encoding="utf-8", errors="ignore") as f:
+            f.write(content)
+        print(f"[NODE {PORT}] Stored block {block_id}")
         return "OK", 200
-    else:
-        return "File not found", 404
+    except Exception as e:
+        print(f"[NODE {PORT}] block_store error: {e}")
+        return "Error", 500
 
 
-@app.route("/download", methods=["POST"])
-def download():
-    name = request.get_json(force=True)["filename"]
-    path = f"{STORAGE_PATH}/{name}"
+@app.route("/block_fetch", methods=["POST"])
+def block_fetch():
+    """
+    Fetch a single block from this node.
+    Request:
+        { "block_id": "file__blk0" }
 
+    Response:
+        { "data": "<block-bytes-as-text>" }
+    """
+    data = request.get_json(force=True)
+    block_id = data.get("block_id")
+    if not block_id:
+        return "missing block_id", 400
+
+    path = block_path(block_id)
     if not os.path.exists(path):
         return "Not found", 404
 
-    return jsonify({"data": open(path).read()})
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        content = f.read()
+    return jsonify({"data": content})
 
 
-@app.route("/replicate", methods=["POST"])
-def replicate():
-    d = request.get_json(force=True)
-    filename = d["filename"]
-    source = d["source_port"]
+@app.route("/block_delete", methods=["POST"])
+def block_delete():
+    """
+    Delete a single block from this node.
+    Request:
+        { "block_id": "file__blk0" }
+    """
+    data = request.get_json(force=True)
+    block_id = data.get("block_id")
+    if not block_id:
+        return "missing block_id", 400
 
-    try:
-        r = requests.post(f"http://127.0.0.1:{source}/download",
-                          json={"filename": filename}, timeout=5)
-
-        if r.status_code != 200:
-            return "Source failed", 500
-
-        content = r.json()["data"]
-
-        with open(f"{STORAGE_PATH}/{filename}", "w") as f:
-            f.write(content)
-
-        print(f"[NODE {PORT}] Replicated {filename} from {source}")
+    path = block_path(block_id)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[NODE {PORT}] Deleted block {block_id}")
         return "OK", 200
+    return "Not found", 404
 
+
+# -------- LEGACY FULL-FILE ENDPOINTS (OPTIONAL / UNUSED NOW) --------
+# Kept for compatibility; not used by new block-based client/GUI.
+
+@app.route("/store", methods=["POST"])
+def store_legacy():
+    data = request.get_json(force=True)
+    filename = data.get("filename")
+    content = data.get("data", "")
+    try:
+        with open(os.path.join(STORAGE, filename), "w", encoding="utf-8", errors="ignore") as f:
+            f.write(content)
+        print(f"[NODE {PORT}] (legacy) Stored {filename}")
+        return "OK", 200
     except Exception as e:
-        return f"Error: {e}", 500
+        print(f"[NODE {PORT}] store error: {e}")
+        return "Error", 500
+
+
+@app.route("/download", methods=["POST"])
+def download_legacy():
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
+    if not os.path.exists(path):
+        return "Not found", 404
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return jsonify({"data": f.read()})
+
+
+@app.route("/delete", methods=["POST"])
+def delete_legacy():
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[NODE {PORT}] (legacy) Deleted {name}")
+        return "OK", 200
+    return "Not found", 404
+
+
+# -------- CONTROL & HEARTBEAT --------
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    global running
+    running = False
+    return "Shutting down", 200
 
 
 def heartbeat():
-    while True:
+    while running:
         try:
-            requests.post(MASTER + "/heartbeat",
-                          json={"port": PORT}, timeout=2)
-        except:
+            requests.post(f"{MASTER}/heartbeat", json={"port": PORT}, timeout=1)
+        except Exception:
             pass
         time.sleep(1)
+    # exit process when running False
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    print(f"[NODE {PORT}] Running at storage {STORAGE_PATH}")
+    print(f"[NODE {PORT}] Running, storage={STORAGE} (block-based)")
     threading.Thread(target=heartbeat, daemon=True).start()
     app.run(port=int(PORT))

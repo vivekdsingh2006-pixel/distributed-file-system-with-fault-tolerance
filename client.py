@@ -1,86 +1,125 @@
-import requests
-import os
+import requests, os
 
-MASTER = "http://127.0.0.1:4000"
+MASTER_URL = "http://127.0.0.1:4000"
 
-# ---------------- UPLOAD ----------------
-def upload_file(filepath):
-    filename = os.path.basename(filepath)
-
-    # Read file content
-    with open(filepath, "r") as f:
-        content = f.read()
-
-    # Ask user for replication factor (optional)
-    rep_factor = 2  # default
-
-    payload = {
-        "filename": filename,
-        "replication_factor": rep_factor
-    }
-
-    # Send upload request to master
-    resp = requests.post(MASTER + "/upload", json=payload)
-    if resp.status_code != 200:
-        return "Upload failed: " + resp.text
-
-    nodes = resp.json().get("store_in", [])
-
-    # Store file on each node
-    for p in nodes:
-        url = f"http://127.0.0.1:{p}/store"
-        requests.post(url, json={"filename": filename, "data": content})
-
-    return f"Stored on nodes: {nodes}"
+# Must match master.py BLOCK_SIZE
+BLOCK_SIZE = 64 * 1024
 
 
-# ---------------- DOWNLOAD ----------------
+def _split_file_into_blocks(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    size = len(data)
+    blocks = []
+    for i in range(0, size, BLOCK_SIZE):
+        chunk_bytes = data[i : i + BLOCK_SIZE]
+        chunk_str = chunk_bytes.decode("utf-8", errors="ignore")
+        blocks.append(chunk_str)
+    return size, blocks
+
+
+def upload_file(path, replication_factor):
+    filename = os.path.basename(path)
+    if not os.path.exists(path):
+        return f"Path not found: {path}"
+
+    size, blocks = _split_file_into_blocks(path)
+    num_blocks = len(blocks)
+
+    # Step 1: ask master for block placements
+    r = requests.post(
+        MASTER_URL + "/upload",
+        json={
+            "filename": filename,
+            "replication_factor": replication_factor,
+            "num_blocks": num_blocks,
+            "size": size,
+        },
+    )
+    if r.status_code != 200:
+        return f"Master upload error: {r.text}"
+
+    meta = r.json()
+    block_metas = meta.get("blocks", [])
+    if len(block_metas) != num_blocks:
+        return "Master returned inconsistent block mapping"
+
+    # Step 2: push each block to assigned DataNodes
+    for idx, (block_data, bmeta) in enumerate(zip(blocks, block_metas)):
+        block_id = bmeta["id"]
+        nodes = bmeta["nodes"]
+        for p in nodes:
+            try:
+                rr = requests.post(
+                    f"http://127.0.0.1:{p}/block_store",
+                    json={"block_id": block_id, "data": block_data},
+                    timeout=10,
+                )
+                if rr.status_code != 200:
+                    print(f"[WARN] Node {p} failed for block {block_id}: {rr.text}")
+            except Exception as e:
+                print(f"[WARN] Error pushing block {block_id} to node {p}: {e}")
+
+    return f"Uploaded {filename} as {num_blocks} blocks, RF={replication_factor}"
+
+
 def download_file(filename):
-    # Ask master where file is
-    r = requests.post(MASTER + "/locate", json={"filename": filename})
+    # Get block locations from Master
+    r = requests.post(MASTER_URL + "/locate", json={"filename": filename})
     if r.status_code != 200:
         return "File not found"
 
-    nodes = r.json()["nodes"]
+    meta = r.json()
+    blocks = meta.get("blocks", [])
 
-    # Try each node until one responds
-    for p in nodes:
-        try:
-            r = requests.post(f"http://127.0.0.1:{p}/download",
-                              json={"filename": filename}, timeout=5)
+    assembled = []
+    for b in blocks:
+        block_id = b["id"]
+        nodes = b["nodes"]
+        block_data = None
 
-            if r.status_code == 200:
-                content = r.json()["data"]
+        for p in nodes:
+            try:
+                rr = requests.post(
+                    f"http://127.0.0.1:{p}/block_fetch",
+                    json={"block_id": block_id},
+                    timeout=8,
+                )
+                if rr.status_code == 200:
+                    block_data = rr.json().get("data", "")
+                    break
+            except Exception:
+                continue
 
-                os.makedirs("downloads", exist_ok=True)
-                path = f"downloads/{filename}"
+        if block_data is None:
+            return f"Failed to download block {block_id} from all replicas"
 
-                with open(path, "w") as f:
-                    f.write(content)
+        assembled.append(block_data)
 
-                return path
-        except:
-            pass
+    # Join blocks and save to downloads
+    os.makedirs("downloads", exist_ok=True)
+    out_path = os.path.join("downloads", filename)
+    with open(out_path, "w", encoding="utf-8", errors="ignore") as f:
+        f.write("".join(assembled))
 
-    return "Download failed"
+    return f"Downloaded to {out_path}"
 
 
-# ---------------- LIST FILES ----------------
 def list_files():
-    d = requests.get(MASTER + "/list").json()
-    return [f"{f}  -> {lst}" for f, lst in d.items()]
+    return requests.get(MASTER_URL + "/list").json()
 
 
-# ---------------- DELETE ----------------
 def delete_file(filename):
-    resp = requests.post(MASTER + "/delete", json={"filename": filename})
-    if resp.status_code != 200:
-        return "Delete failed: " + resp.text
+    r = requests.post(MASTER_URL + "/delete", json={"filename": filename})
+    if r.status_code != 200:
+        return "Delete failed: " + r.text
+    return r.json()
 
-    return resp.json()
 
-
-# ---------------- NODE STATUS ----------------
-def get_node_status():
-    d = requests.get(MASTER + "/status").json()
-    return [{"id": p, "status": s} for p, s in d.items()]
+if __name__ == "__main__":
+    # Simple manual test usage example (optional)
+    # print(upload_file("test.txt", 3))
+    # print(download_file("test.txt"))
+    # print(list_files())
+    # print(delete_file("test.txt"))
+    pass
