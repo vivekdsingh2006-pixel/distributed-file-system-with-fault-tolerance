@@ -44,6 +44,7 @@ See all uploaded files and delete them from DFS.
 📂 Project Structure
 dfs-project/
 │
+|__ gui.py
 ├── master.py          # Master server (metadata manager)
 ├── node.py            # Storage node server
 ├── client.py          # Client for upload/download
