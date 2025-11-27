@@ -1,97 +1,78 @@
 from flask import Flask, request, jsonify
-import os
-import threading
-import time
-import sys
-import requests
+import os, threading, time, sys, requests
 
 app = Flask(__name__)
 
-if len(sys.argv) != 2:
+if len(sys.argv) < 2:
     print("Usage: python node.py <port>")
     sys.exit(1)
 
 PORT = sys.argv[1]
-NODE_NUM = PORT[-1]
-STORAGE_PATH = f"storage/node{NODE_NUM}"
+NODE_NUM = PORT[-1]  # assumes single digit 1..9
+STORAGE = f"storage/node{NODE_NUM}"
 MASTER = "http://127.0.0.1:4000"
 
-os.makedirs(STORAGE_PATH, exist_ok=True)
+os.makedirs(STORAGE, exist_ok=True)
+running = True
 
 
 @app.route("/store", methods=["POST"])
 def store():
-    d = request.get_json(force=True)
-    filename = d["filename"]
-    data = d.get("data", "")
-
-    with open(f"{STORAGE_PATH}/{filename}", "w") as f:
-        f.write(data)
-
-    print(f"[NODE {PORT}] Stored {filename}")
-    return "OK", 200
-
-@app.route("/delete", methods=["POST"])
-def delete():
     data = request.get_json(force=True)
-    filename = data["filename"]
-    path = f"{STORAGE_PATH}/{filename}"
-
-    if os.path.exists(path):
-        os.remove(path)
-        print(f"[NODE {PORT}] Deleted {filename}")
+    filename = data.get("filename")
+    content = data.get("data", "")
+    try:
+        with open(os.path.join(STORAGE, filename), "w", encoding="utf-8", errors="ignore") as f:
+            f.write(content)
+        print(f"[NODE {PORT}] Stored {filename}")
         return "OK", 200
-    else:
-        return "File not found", 404
+    except Exception as e:
+        print(f"[NODE {PORT}] store error: {e}")
+        return "Error", 500
 
 
 @app.route("/download", methods=["POST"])
 def download():
-    name = request.get_json(force=True)["filename"]
-    path = f"{STORAGE_PATH}/{name}"
-
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
     if not os.path.exists(path):
         return "Not found", 404
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return jsonify({"data": f.read()})
 
-    return jsonify({"data": open(path).read()})
 
-
-@app.route("/replicate", methods=["POST"])
-def replicate():
-    d = request.get_json(force=True)
-    filename = d["filename"]
-    source = d["source_port"]
-
-    try:
-        r = requests.post(f"http://127.0.0.1:{source}/download",
-                          json={"filename": filename}, timeout=5)
-
-        if r.status_code != 200:
-            return "Source failed", 500
-
-        content = r.json()["data"]
-
-        with open(f"{STORAGE_PATH}/{filename}", "w") as f:
-            f.write(content)
-
-        print(f"[NODE {PORT}] Replicated {filename} from {source}")
+@app.route("/delete", methods=["POST"])
+def delete():
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[NODE {PORT}] Deleted {name}")
         return "OK", 200
+    return "Not found", 404
 
-    except Exception as e:
-        return f"Error: {e}", 500
+
+@app.route("/shutdown", methods=["POST"])
+def shutdown():
+    global running
+    running = False
+    return "Shutting down", 200
 
 
 def heartbeat():
-    while True:
+    while running:
         try:
-            requests.post(MASTER + "/heartbeat",
-                          json={"port": PORT}, timeout=2)
+            requests.post(f"{MASTER}/heartbeat", json={"port": PORT}, timeout=1)
         except:
             pass
         time.sleep(1)
+    # exit process when running False
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    print(f"[NODE {PORT}] Running at storage {STORAGE_PATH}")
+    print(f"[NODE {PORT}] Running, storage={STORAGE}")
     threading.Thread(target=heartbeat, daemon=True).start()
     app.run(port=int(PORT))

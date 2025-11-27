@@ -1,86 +1,48 @@
-import requests
-import os
+import requests, os
 
-MASTER = "http://127.0.0.1:4000"
-
-# ---------------- UPLOAD ----------------
-def upload_file(filepath):
-    filename = os.path.basename(filepath)
-
-    # Read file content
-    with open(filepath, "r") as f:
-        content = f.read()
-
-    # Ask user for replication factor (optional)
-    rep_factor = 2  # default
-
-    payload = {
-        "filename": filename,
-        "replication_factor": rep_factor
-    }
-
-    # Send upload request to master
-    resp = requests.post(MASTER + "/upload", json=payload)
-    if resp.status_code != 200:
-        return "Upload failed: " + resp.text
-
-    nodes = resp.json().get("store_in", [])
-
-    # Store file on each node
-    for p in nodes:
-        url = f"http://127.0.0.1:{p}/store"
-        requests.post(url, json={"filename": filename, "data": content})
-
-    return f"Stored on nodes: {nodes}"
+MASTER_URL = "http://127.0.0.1:4000"
 
 
-# ---------------- DOWNLOAD ----------------
-def download_file(filename):
-    # Ask master where file is
-    r = requests.post(MASTER + "/locate", json={"filename": filename})
+def upload_file(path, replication_factor):
+    filename = os.path.basename(path)
+    r = requests.post(MASTER_URL + "/upload", json={"filename": filename, "replication_factor": replication_factor})
     if r.status_code != 200:
-        return "File not found"
-
-    nodes = r.json()["nodes"]
-
-    # Try each node until one responds
+        return f"Master upload error: {r.text}"
+    nodes = r.json().get("store_in", [])
+    with open(path, "rb") as f:
+        content = f.read().decode("utf-8", errors="ignore")
     for p in nodes:
         try:
-            r = requests.post(f"http://127.0.0.1:{p}/download",
-                              json={"filename": filename}, timeout=5)
-
-            if r.status_code == 200:
-                content = r.json()["data"]
-
-                os.makedirs("downloads", exist_ok=True)
-                path = f"downloads/{filename}"
-
-                with open(path, "w") as f:
-                    f.write(content)
-
-                return path
+            requests.post(f"http://127.0.0.1:{p}/store", json={"filename": filename, "data": content}, timeout=10)
         except:
             pass
+    return f"Uploaded to nodes: {nodes}"
 
-    return "Download failed"
+
+def download_file(filename):
+    r = requests.post(MASTER_URL + "/locate", json={"filename": filename})
+    if r.status_code != 200:
+        return "File not found"
+    for p in r.json().get("nodes", []):
+        try:
+            rr = requests.post(f"http://127.0.0.1:{p}/download", json={"filename": filename}, timeout=8)
+            if rr.status_code == 200:
+                data = rr.json().get("data", "")
+                os.makedirs("downloads", exist_ok=True)
+                with open(os.path.join("downloads", filename), "w", encoding="utf-8", errors="ignore") as f:
+                    f.write(data)
+                return f"Downloaded from node {p}"
+        except:
+            pass
+    return "Failed to download from all replicas"
 
 
-# ---------------- LIST FILES ----------------
 def list_files():
-    d = requests.get(MASTER + "/list").json()
-    return [f"{f}  -> {lst}" for f, lst in d.items()]
+    return requests.get(MASTER_URL + "/list").json()
 
 
-# ---------------- DELETE ----------------
 def delete_file(filename):
-    resp = requests.post(MASTER + "/delete", json={"filename": filename})
-    if resp.status_code != 200:
-        return "Delete failed: " + resp.text
-
-    return resp.json()
-
-
-# ---------------- NODE STATUS ----------------
-def get_node_status():
-    d = requests.get(MASTER + "/status").json()
-    return [{"id": p, "status": s} for p, s in d.items()]
+    r = requests.post(MASTER_URL + "/delete", json={"filename": filename})
+    if r.status_code != 200:
+        return "Delete failed"
+    return r.json()
