@@ -10,7 +10,11 @@ HEARTBEAT_TIMEOUT = 5
 MONITOR_INTERVAL = 2
 CLIENT_TIMEOUT = 6
 
+<<<<<<< HEAD
 # Node state: node_port -> { alive: bool, last_heartbeat: ts }
+=======
+# node_port -> { alive: bool, last_heartbeat: ts }
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
 nodes = {}
 for n in cfg["nodes"]:
     port = str(n["port"])
@@ -19,6 +23,7 @@ for n in cfg["nodes"]:
 # client_id -> last_heartbeat_ts
 clients = {}
 
+<<<<<<< HEAD
 # filename -> metadata
 # {
 #   "replication_factor": int,
@@ -34,6 +39,11 @@ file_index = {}
 # Default block size (bytes) – must match client/gui
 BLOCK_SIZE = 64 * 1024
 
+=======
+# filename -> [ports]
+file_index = {}
+
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
 lock = threading.Lock()
 
 
@@ -96,6 +106,7 @@ def upload():
     """
     data = request.get_json(force=True)
     filename = data.get("filename")
+<<<<<<< HEAD
     if not filename:
         return "missing filename", 400
 
@@ -137,6 +148,16 @@ def upload():
             "blocks": response_blocks,
         }
     )
+=======
+    rep = int(data.get("replication_factor", 1))
+    with lock:
+        alive_nodes = [p for p, info in nodes.items() if info["alive"]]
+        if rep > len(alive_nodes):
+            return f"Not enough alive nodes ({len(alive_nodes)} available)", 500
+        chosen = random.sample(alive_nodes, rep)
+        file_index[filename] = chosen.copy()
+    return jsonify({"store_in": chosen})
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
 
 
 @app.route("/locate", methods=["POST"])
@@ -161,13 +182,17 @@ def locate():
     """
     data = request.get_json(force=True)
     filename = data.get("filename")
+<<<<<<< HEAD
     if not filename:
         return "missing filename", 400
 
+=======
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
     with lock:
         meta = file_index.get(filename)
         if not meta:
             return "File not found", 404
+<<<<<<< HEAD
 
         blocks = []
         for b in meta["blocks"]:
@@ -220,6 +245,32 @@ def delete():
                 pass
 
     return jsonify({"filename": filename, "deleted_from": deleted_from})
+=======
+        lst = file_index[filename]
+        alive = [p for p in lst if nodes.get(p, {}).get("alive")]
+        dead = [p for p in lst if not nodes.get(p, {}).get("alive")]
+    return jsonify({"nodes": alive + dead})
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
+
+
+@app.route("/delete", methods=["POST"])
+def delete():
+    data = request.get_json(force=True)
+    filename = data.get("filename")
+    with lock:
+        if filename not in file_index:
+            return "File not found", 404
+        targets = file_index[filename].copy()
+    # attempt to delete on each node (best-effort)
+    for p in targets:
+        try:
+            requests.post(f"http://127.0.0.1:{p}/delete", json={"filename": filename}, timeout=2)
+        except:
+            pass
+    with lock:
+        if filename in file_index:
+            del file_index[filename]
+    return jsonify({"deleted_from": targets})
 
 
 @app.route("/list", methods=["GET"])
@@ -329,19 +380,29 @@ def monitor_loop():
                 if info["alive"] and (now - info["last_heartbeat"] > HEARTBEAT_TIMEOUT):
                     info["alive"] = False
                     print(f"[MASTER] Node {port} went DOWN")
+<<<<<<< HEAD
 
+=======
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
             # cleanup dead clients
             dead_clients = [c for c, t in clients.items() if now - t > CLIENT_TIMEOUT]
             for c in dead_clients:
                 del clients[c]
+<<<<<<< HEAD
 
         # After updating node states, do re-replication checks
         alive_nodes, files_copy = _snapshot_state_for_replication()
         _perform_re_replication(alive_nodes, files_copy)
+=======
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
 
 
 threading.Thread(target=monitor_loop, daemon=True).start()
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     print("[MASTER] Running at 4000 with block-based DFS")
+=======
+    print("[MASTER] Running at 4000")
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
     app.run(port=4000)

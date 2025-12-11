@@ -16,6 +16,7 @@ os.makedirs(STORAGE, exist_ok=True)
 running = True
 
 
+<<<<<<< HEAD
 # -------- BLOCK-BASED STORAGE --------
 
 def block_path(block_id: str) -> str:
@@ -89,10 +90,47 @@ def block_delete():
     if os.path.exists(path):
         os.remove(path)
         print(f"[NODE {PORT}] Deleted block {block_id}")
+=======
+@app.route("/store", methods=["POST"])
+def store():
+    data = request.get_json(force=True)
+    filename = data.get("filename")
+    content = data.get("data", "")
+    try:
+        with open(os.path.join(STORAGE, filename), "w", encoding="utf-8", errors="ignore") as f:
+            f.write(content)
+        print(f"[NODE {PORT}] Stored {filename}")
+        return "OK", 200
+    except Exception as e:
+        print(f"[NODE {PORT}] store error: {e}")
+        return "Error", 500
+
+
+@app.route("/download", methods=["POST"])
+def download():
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
+    if not os.path.exists(path):
+        return "Not found", 404
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return jsonify({"data": f.read()})
+
+
+@app.route("/delete", methods=["POST"])
+def delete():
+    data = request.get_json(force=True)
+    name = data.get("filename")
+    path = os.path.join(STORAGE, name)
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"[NODE {PORT}] Deleted {name}")
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
         return "OK", 200
     return "Not found", 404
 
 
+<<<<<<< HEAD
 # -------- LEGACY FULL-FILE ENDPOINTS (OPTIONAL / UNUSED NOW) --------
 # Kept for compatibility; not used by new block-based client/GUI.
 
@@ -136,6 +174,8 @@ def delete_legacy():
 
 # -------- CONTROL & HEARTBEAT --------
 
+=======
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
 @app.route("/shutdown", methods=["POST"])
 def shutdown():
     global running
@@ -147,7 +187,11 @@ def heartbeat():
     while running:
         try:
             requests.post(f"{MASTER}/heartbeat", json={"port": PORT}, timeout=1)
+<<<<<<< HEAD
         except Exception:
+=======
+        except:
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
             pass
         time.sleep(1)
     # exit process when running False
@@ -155,6 +199,10 @@ def heartbeat():
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     print(f"[NODE {PORT}] Running, storage={STORAGE} (block-based)")
+=======
+    print(f"[NODE {PORT}] Running, storage={STORAGE}")
+>>>>>>> 9a09f7621a4d8ff6b5ac875d70bb06a6bd10d679
     threading.Thread(target=heartbeat, daemon=True).start()
     app.run(port=int(PORT))
